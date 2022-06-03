@@ -460,6 +460,10 @@ SENTRY_EXPERIMENTAL_API char *sentry_value_to_msgpack(
 SENTRY_EXPERIMENTAL_API void sentry_event_value_add_stacktrace(
     sentry_value_t event, void **ips, size_t len);
 
+SENTRY_EXPERIMENTAL_API void sentry_event_value_add_stacktrace_skip_frames(
+    sentry_value_t event, size_t frames_to_skip);
+
+
 /**
  * This represents the OS dependent user context in the case of a crash, and can
  * be used to manually capture a crash.

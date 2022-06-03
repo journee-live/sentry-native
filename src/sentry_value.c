@@ -1209,3 +1209,37 @@ sentry_event_value_add_stacktrace(sentry_value_t event, void **ips, size_t len)
 
     sentry_event_add_thread(event, thread);
 }
+
+sentry_value_t
+sentry_value_new_stacktrace_skip_frames(size_t frames_to_skip)
+{
+  void *walked_backtrace[256];
+
+  // if nobody gave us a backtrace, walk now.
+  size_t len = sentry_unwind_stack(NULL, walked_backtrace, 256);
+  void **ips = walked_backtrace;
+
+
+  sentry_value_t frames = sentry__value_new_list_with_size(len);
+  for (size_t i = 0; i < len - frames_to_skip; i++) {
+    sentry_value_t frame = sentry_value_new_object();
+    sentry_value_set_by_key(frame, "instruction_addr",
+                            sentry__value_new_addr((uint64_t)(size_t)ips[len - i - 1]));
+    sentry_value_append(frames, frame);
+  }
+
+  sentry_value_t stacktrace = sentry_value_new_object();
+  sentry_value_set_by_key(stacktrace, "frames", frames);
+
+  return stacktrace;
+}
+
+void sentry_event_value_add_stacktrace_skip_frames(
+    sentry_value_t event, size_t frames_to_skip) {
+  sentry_value_t stacktrace = sentry_value_new_stacktrace_skip_frames(frames_to_skip);
+
+  sentry_value_t thread = sentry_value_new_object();
+  sentry_value_set_by_key(thread, "stacktrace", stacktrace);
+
+  sentry_event_add_thread(event, thread);
+}
