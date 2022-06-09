@@ -8,6 +8,11 @@ else()
 	cmake_minimum_required (VERSION 3.10)
 endif()
 
+add_definitions(-D_ITERATOR_DEBUG_LEVEL=0)
+
+
+#add_compile_definitions(ITERATOR_DEBUG_LEVEL=0)
+
 #read sentry-native version
 file(READ "include/sentry.h" _SENTRY_HEADER_CONTENT)
 string(REGEX MATCH "#define SENTRY_SDK_VERSION \"([0-9\.]+)\"" _SENTRY_VERSION_MATCH "${_SENTRY_HEADER_CONTENT}")
@@ -581,3 +586,33 @@ if(SENTRY_BUILD_EXAMPLES)
 
 	add_test(NAME sentry_example COMMAND sentry_example)
 endif()
+
+
+macro(configure_msvc_runtime)
+			function(get_all_targets var)
+				set(targets)
+				get_all_targets_recursive(targets ${CMAKE_CURRENT_SOURCE_DIR})
+				set(${var} ${targets} PARENT_SCOPE)
+			endfunction()
+
+			macro(get_all_targets_recursive targets dir)
+				get_property(subdirectories DIRECTORY ${dir} PROPERTY SUBDIRECTORIES)
+				foreach (subdir ${subdirectories})
+					get_all_targets_recursive(${targets} ${subdir})
+				endforeach ()
+
+				get_property(current_targets DIRECTORY ${dir} PROPERTY BUILDSYSTEM_TARGETS)
+				list(APPEND ${targets} ${current_targets})
+			endmacro()
+
+			get_all_targets(all_targets)
+
+			foreach (target ${all_targets})
+				message(Targ: ${target})
+					set_property(TARGET ${target} PROPERTY
+							MSVC_RUNTIME_LIBRARY "MultiThreaded")
+			endforeach ()
+
+endmacro()
+
+configure_msvc_runtime()
