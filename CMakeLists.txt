@@ -608,9 +608,8 @@ macro(configure_msvc_runtime)
 			get_all_targets(all_targets)
 
 			foreach (target ${all_targets})
-				message(Targ: ${target})
-					set_property(TARGET ${target} PROPERTY
-							MSVC_RUNTIME_LIBRARY "MultiThreaded")
+				set_property(TARGET ${target} PROPERTY
+						MSVC_RUNTIME_LIBRARY "MultiThreaded")
 			endforeach ()
 
 endmacro()
