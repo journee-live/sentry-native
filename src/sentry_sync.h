@@ -13,7 +13,7 @@
 #    define THREAD_FUNCTION_API
 #endif
 
-#if defined(__MINGW32__) && !defined(__MINGW64__)
+#if defined(__MINGW32__) && !defined(__MINGW64__) && !defined(__clang__)
 #    define UNSIGNED_MINGW unsigned
 #else
 #    define UNSIGNED_MINGW
@@ -167,7 +167,10 @@ typedef HANDLE sentry_threadid_t;
 typedef struct sentry__winmutex_s sentry_mutex_t;
 #    define SENTRY__MUTEX_INIT                                                 \
         {                                                                      \
-            INIT_ONCE_STATIC_INIT, { 0 }                                       \
+            INIT_ONCE_STATIC_INIT,                                             \
+            {                                                                  \
+                0                                                              \
+            }                                                                  \
         }
 #    define sentry__mutex_init(Lock) sentry__winmutex_init(Lock)
 #    define sentry__mutex_lock(Lock) sentry__winmutex_lock(Lock)

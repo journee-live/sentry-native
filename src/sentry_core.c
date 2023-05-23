@@ -1,10 +1,8 @@
 #include "sentry_boot.h"
 
 #include <stdarg.h>
-#include <stdlib.h>
 #include <string.h>
 
-#include "sentry_alloc.h"
 #include "sentry_backend.h"
 #include "sentry_core.h"
 #include "sentry_database.h"
@@ -389,6 +387,14 @@ sentry_capture_event(sentry_value_t event)
     }
 }
 
+bool
+sentry__roll_dice(double probability)
+{
+    uint64_t rnd;
+    return probability >= 1.0 || sentry__getrandom(&rnd, sizeof(rnd))
+        || ((double)rnd / (double)UINT64_MAX) <= probability;
+}
+
 sentry_uuid_t
 sentry__capture_event(sentry_value_t event)
 {
@@ -403,7 +409,7 @@ sentry__capture_event(sentry_value_t event)
         if (sentry__event_is_transaction(event)) {
             envelope = sentry__prepare_transaction(options, event, &event_id);
         } else {
-            envelope = sentry__prepare_event(options, event, &event_id);
+            envelope = sentry__prepare_event(options, event, &event_id, true);
         }
         if (envelope) {
             if (options->session) {
@@ -416,22 +422,21 @@ sentry__capture_event(sentry_value_t event)
                 mut_options->session->init = false;
                 sentry__options_unlock();
             }
-            sentry__capture_envelope(options->transport, envelope);
-            was_sent = true;
+
+            bool should_skip = !sentry__roll_dice(options->sample_rate);
+            if (should_skip) {
+                SENTRY_DEBUG("throwing away event due to sample rate");
+                sentry_envelope_free(envelope);
+            } else {
+                sentry__capture_envelope(options->transport, envelope);
+                was_sent = true;
+            }
         }
     }
     if (!was_captured) {
         sentry_value_decref(event);
     }
     return was_sent ? event_id : sentry_uuid_nil();
-}
-
-bool
-sentry__roll_dice(double probability)
-{
-    uint64_t rnd;
-    return probability >= 1.0 || sentry__getrandom(&rnd, sizeof(rnd))
-        || ((double)rnd / (double)UINT64_MAX) <= probability;
 }
 
 bool
@@ -453,18 +458,12 @@ sentry__should_send_transaction(sentry_value_t tx_cxt)
 
 sentry_envelope_t *
 sentry__prepare_event(const sentry_options_t *options, sentry_value_t event,
-    sentry_uuid_t *event_id)
+    sentry_uuid_t *event_id, bool invoke_before_send)
 {
     sentry_envelope_t *envelope = NULL;
 
     if (event_is_considered_error(event)) {
         sentry__record_errors_on_current_session(1);
-    }
-
-    bool should_skip = !sentry__roll_dice(options->sample_rate);
-    if (should_skip) {
-        SENTRY_DEBUG("throwing away event due to sample rate");
-        goto fail;
     }
 
     SENTRY_WITH_SCOPE (scope) {
@@ -476,7 +475,7 @@ sentry__prepare_event(const sentry_options_t *options, sentry_value_t event,
         sentry__scope_apply_to_event(scope, options, event, mode);
     }
 
-    if (options->before_send_func) {
+    if (options->before_send_func && invoke_before_send) {
         SENTRY_TRACE("invoking `before_send` hook");
         event
             = options->before_send_func(event, NULL, options->before_send_data);
@@ -640,10 +639,28 @@ sentry_set_tag(const char *key, const char *value)
 }
 
 void
+sentry_set_tag_n(
+    const char *key, size_t key_len, const char *value, size_t value_len)
+{
+    SENTRY_WITH_SCOPE_MUT (scope) {
+        sentry_value_set_by_key_n(scope->tags, key, key_len,
+            sentry_value_new_string_n(value, value_len));
+    }
+}
+
+void
 sentry_remove_tag(const char *key)
 {
     SENTRY_WITH_SCOPE_MUT (scope) {
         sentry_value_remove_by_key(scope->tags, key);
+    }
+}
+
+void
+sentry_remove_tag_n(const char *key, size_t key_len)
+{
+    SENTRY_WITH_SCOPE_MUT (scope) {
+        sentry_value_remove_by_key_n(scope->tags, key, key_len);
     }
 }
 
@@ -656,10 +673,26 @@ sentry_set_extra(const char *key, sentry_value_t value)
 }
 
 void
+sentry_set_extra_n(const char *key, size_t key_len, sentry_value_t value)
+{
+    SENTRY_WITH_SCOPE_MUT (scope) {
+        sentry_value_set_by_key_n(scope->extra, key, key_len, value);
+    }
+}
+
+void
 sentry_remove_extra(const char *key)
 {
     SENTRY_WITH_SCOPE_MUT (scope) {
         sentry_value_remove_by_key(scope->extra, key);
+    }
+}
+
+void
+sentry_remove_extra_n(const char *key, size_t key_len)
+{
+    SENTRY_WITH_SCOPE_MUT (scope) {
+        sentry_value_remove_by_key_n(scope->extra, key, key_len);
     }
 }
 
@@ -672,10 +705,45 @@ sentry_set_context(const char *key, sentry_value_t value)
 }
 
 void
+sentry_set_context_n(const char *key, size_t key_len, sentry_value_t value)
+{
+    SENTRY_WITH_SCOPE_MUT (scope) {
+        sentry_value_set_by_key_n(scope->contexts, key, key_len, value);
+    }
+}
+
+void
 sentry_remove_context(const char *key)
 {
     SENTRY_WITH_SCOPE_MUT (scope) {
         sentry_value_remove_by_key(scope->contexts, key);
+    }
+}
+
+void
+sentry_remove_context_n(const char *key, size_t key_len)
+{
+    SENTRY_WITH_SCOPE_MUT (scope) {
+        sentry_value_remove_by_key_n(scope->contexts, key, key_len);
+    }
+}
+
+void
+sentry_set_fingerprint_n(const char *fingerprint, size_t fingerprint_len, ...)
+{
+    sentry_value_t fingerprint_value = sentry_value_new_list();
+
+    va_list va;
+    va_start(va, fingerprint_len);
+    for (; fingerprint; fingerprint = va_arg(va, const char *)) {
+        sentry_value_append(fingerprint_value,
+            sentry_value_new_string_n(fingerprint, fingerprint_len));
+    }
+    va_end(va);
+
+    SENTRY_WITH_SCOPE_MUT (scope) {
+        sentry_value_decref(scope->fingerprint);
+        scope->fingerprint = fingerprint_value;
     }
 }
 
@@ -695,7 +763,7 @@ sentry_set_fingerprint(const char *fingerprint, ...)
     SENTRY_WITH_SCOPE_MUT (scope) {
         sentry_value_decref(scope->fingerprint);
         scope->fingerprint = fingerprint_value;
-    };
+    }
 }
 
 void
@@ -704,7 +772,7 @@ sentry_remove_fingerprint(void)
     SENTRY_WITH_SCOPE_MUT (scope) {
         sentry_value_decref(scope->fingerprint);
         scope->fingerprint = sentry_value_new_null();
-    };
+    }
 }
 
 void
@@ -716,6 +784,21 @@ sentry_set_transaction(const char *transaction)
 
         if (scope->transaction_object) {
             sentry_transaction_set_name(scope->transaction_object, transaction);
+        }
+    }
+}
+
+void
+sentry_set_transaction_n(const char *transaction, size_t transaction_len)
+{
+    SENTRY_WITH_SCOPE_MUT (scope) {
+        sentry_free(scope->transaction);
+        scope->transaction
+            = sentry__string_clone_n(transaction, transaction_len);
+
+        if (scope->transaction_object) {
+            sentry_transaction_set_name_n(
+                scope->transaction_object, transaction, transaction_len);
         }
     }
 }
@@ -735,6 +818,10 @@ sentry_transaction_start(
     // Just free this immediately until we implement proper support for
     // traces_sampler.
     sentry_value_decref(sampling_ctx);
+
+    if (!opaque_tx_cxt) {
+        return NULL;
+    }
 
     sentry_value_t tx_cxt = opaque_tx_cxt->inner;
 
@@ -865,8 +952,9 @@ sentry_set_span(sentry_span_t *span)
 }
 
 sentry_span_t *
-sentry_transaction_start_child(
-    sentry_transaction_t *opaque_parent, char *operation, char *description)
+sentry_transaction_start_child_n(sentry_transaction_t *opaque_parent,
+    const char *operation, size_t operation_len, const char *description,
+    size_t description_len)
 {
     if (!opaque_parent || sentry_value_is_null(opaque_parent->inner)) {
         SENTRY_DEBUG("no transaction available to create a child under");
@@ -881,14 +969,25 @@ sentry_transaction_start_child(
         max_spans = options->max_spans;
     }
 
-    sentry_value_t span
-        = sentry__value_span_new(max_spans, parent, operation, description);
+    sentry_value_t span = sentry__value_span_new_n(max_spans, parent,
+        (sentry_slice_t) { operation, operation_len },
+        (sentry_slice_t) { description, description_len });
     return sentry__span_new(opaque_parent, span);
 }
 
 sentry_span_t *
-sentry_span_start_child(
-    sentry_span_t *opaque_parent, char *operation, char *description)
+sentry_transaction_start_child(sentry_transaction_t *opaque_parent,
+    const char *operation, const char *description)
+{
+    const size_t operation_len = operation ? strlen(operation) : 0;
+    const size_t description_len = description ? strlen(description) : 0;
+    return sentry_transaction_start_child_n(
+        opaque_parent, operation, operation_len, description, description_len);
+}
+
+sentry_span_t *
+sentry_span_start_child_n(sentry_span_t *opaque_parent, const char *operation,
+    size_t operation_len, const char *description, size_t description_len)
 {
     if (!opaque_parent || sentry_value_is_null(opaque_parent->inner)) {
         SENTRY_DEBUG("no parent span available to create a child span under");
@@ -907,10 +1006,21 @@ sentry_span_start_child(
         max_spans = options->max_spans;
     }
 
-    sentry_value_t span
-        = sentry__value_span_new(max_spans, parent, operation, description);
+    sentry_value_t span = sentry__value_span_new_n(max_spans, parent,
+        (sentry_slice_t) { operation, operation_len },
+        (sentry_slice_t) { description, description_len });
 
     return sentry__span_new(opaque_parent->transaction, span);
+}
+
+sentry_span_t *
+sentry_span_start_child(sentry_span_t *opaque_parent, const char *operation,
+    const char *description)
+{
+    size_t operation_len = operation ? strlen(operation) : 0;
+    size_t description_len = description ? strlen(description) : 0;
+    return sentry_span_start_child_n(
+        opaque_parent, operation, operation_len, description, description_len);
 }
 
 void
@@ -1000,22 +1110,21 @@ sentry_span_finish(sentry_span_t *opaque_span)
         sentry_value_set_by_key(root_transaction, "spans", spans);
     }
     sentry_value_append(spans, span);
-    sentry__span_free(opaque_span);
+    sentry__span_decref(opaque_span);
     return;
 
 fail:
-    sentry__span_free(opaque_span);
-    return;
+    sentry__span_decref(opaque_span);
 }
 
 int
-sentry_get_crashed_last_run()
+sentry_get_crashed_last_run(void)
 {
     return g_last_crash;
 }
 
 int
-sentry_clear_crashed_last_run()
+sentry_clear_crashed_last_run(void)
 {
     bool success = false;
     sentry_options_t *options = sentry__options_lock();

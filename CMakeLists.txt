@@ -8,11 +8,6 @@ else()
 	cmake_minimum_required (VERSION 3.10)
 endif()
 
-add_definitions(-D_ITERATOR_DEBUG_LEVEL=0)
-
-
-#add_compile_definitions(ITERATOR_DEBUG_LEVEL=0)
-
 #read sentry-native version
 file(READ "include/sentry.h" _SENTRY_HEADER_CONTENT)
 string(REGEX MATCH "#define SENTRY_SDK_VERSION \"([0-9\.]+)\"" _SENTRY_VERSION_MATCH "${_SENTRY_HEADER_CONTENT}")
@@ -279,7 +274,7 @@ endif()
 
 if(SENTRY_TRANSPORT_CURL)
 	if(NOT CURL_FOUND) # Some other lib might bring libcurl already
-		find_package(CURL REQUIRED)
+		find_package(CURL REQUIRED COMPONENTS AsynchDNS)
 	endif()
 
 	if(TARGET CURL::libcurl) # Only available in cmake 3.12+
@@ -339,16 +334,6 @@ target_include_directories(sentry
 		"$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>"
 )
 
-# The modulefinder and symbolizer need these two settings, and they are exported
-# as `PUBLIC`, so libraries that depend on sentry get these too:
-# `-E`: To have all symbols in the dynamic symbol table.
-# `--build-id`: To have a build-id in the ELF object.
-# FIXME: cmake 3.13 introduced target_link_options
-option(SENTRY_EXPORT_SYMBOLS "Export symbols for modulefinder and symbolizer" ON)
-if(SENTRY_EXPORT_SYMBOLS)
-	target_link_libraries(sentry PUBLIC
-		"$<$<OR:$<PLATFORM_ID:Linux>,$<PLATFORM_ID:Android>>:-Wl,-E,--build-id=sha1>")
-endif()
 
 #respect CMAKE_SYSTEM_VERSION
 if(WIN32)
@@ -442,6 +427,10 @@ if(SENTRY_BACKEND_CRASHPAD)
 		endif()
 		add_subdirectory(external/crashpad crashpad_build)
 
+		if(CRASHPAD_WER_ENABLED)
+			add_dependencies(sentry crashpad::wer)
+		endif()
+
 		# set static runtime if enabled
 		if(SENTRY_BUILD_RUNTIMESTATIC AND MSVC)
 			set_property(TARGET crashpad_client PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -453,6 +442,9 @@ if(SENTRY_BACKEND_CRASHPAD)
 			set_property(TARGET crashpad_snapshot PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 			set_property(TARGET crashpad_tools PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 			set_property(TARGET crashpad_util PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+			if(CRASHPAD_WER_ENABLED)
+				set_property(TARGET crashpad_wer PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+			endif()
 			set_property(TARGET crashpad_zlib PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 			set_property(TARGET mini_chromium PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 		endif()
@@ -469,6 +461,9 @@ if(SENTRY_BACKEND_CRASHPAD)
 			set_target_properties(crashpad_util PROPERTIES FOLDER ${SENTRY_FOLDER})
 			set_target_properties(crashpad_zlib PROPERTIES FOLDER ${SENTRY_FOLDER})
 			set_target_properties(mini_chromium PROPERTIES FOLDER ${SENTRY_FOLDER})
+			if(CRASHPAD_WER_ENABLED)
+				set_target_properties(crashpad_wer PROPERTIES FOLDER ${SENTRY_FOLDER})
+			endif()
 		endif()
 
 		target_link_libraries(sentry PRIVATE
@@ -481,9 +476,17 @@ if(SENTRY_BACKEND_CRASHPAD)
 		if(WIN32 AND MSVC)
 			sentry_install(FILES $<TARGET_PDB_FILE:crashpad_handler>
 				DESTINATION "${CMAKE_INSTALL_BINDIR}" OPTIONAL)
+			if (CRASHPAD_WER_ENABLED)
+				sentry_install(FILES $<TARGET_PDB_FILE:crashpad_wer>
+					DESTINATION "${CMAKE_INSTALL_BINDIR}" OPTIONAL)
+			endif()
 		endif()
 	endif()
 	add_dependencies(sentry crashpad::handler)
+
+	if(CRASHPAD_WER_ENABLED)
+		add_compile_definitions(CRASHPAD_WER_ENABLED)
+	endif()
 elseif(SENTRY_BACKEND_BREAKPAD)
 	option(SENTRY_BREAKPAD_SYSTEM "Use system breakpad" OFF)
 	if(SENTRY_BREAKPAD_SYSTEM)
@@ -573,6 +576,10 @@ if(SENTRY_BUILD_EXAMPLES)
 
 	if(MSVC)
 		target_compile_options(sentry_example PRIVATE $<BUILD_INTERFACE:/wd5105>)
+		if(CRASHPAD_WER_ENABLED)
+			# to test handling SEH by-passing exceptions we need to enable the control flow guard
+			target_compile_options(sentry_example PRIVATE $<BUILD_INTERFACE:/guard:cf>)
+		endif()
 	endif()
 
 	# set static runtime if enabled
@@ -587,32 +594,15 @@ if(SENTRY_BUILD_EXAMPLES)
 	add_test(NAME sentry_example COMMAND sentry_example)
 endif()
 
-
-macro(configure_msvc_runtime)
-			function(get_all_targets var)
-				set(targets)
-				get_all_targets_recursive(targets ${CMAKE_CURRENT_SOURCE_DIR})
-				set(${var} ${targets} PARENT_SCOPE)
-			endfunction()
-
-			macro(get_all_targets_recursive targets dir)
-				get_property(subdirectories DIRECTORY ${dir} PROPERTY SUBDIRECTORIES)
-				foreach (subdir ${subdirectories})
-					get_all_targets_recursive(${targets} ${subdir})
-				endforeach ()
-
-				get_property(current_targets DIRECTORY ${dir} PROPERTY BUILDSYSTEM_TARGETS)
-				list(APPEND ${targets} ${current_targets})
-			endmacro()
-
-			get_all_targets(all_targets)
-
-			foreach (target ${all_targets})
-				message(Targ: ${target})
-					set_property(TARGET ${target} PROPERTY
-							MSVC_RUNTIME_LIBRARY "MultiThreaded")
-			endforeach ()
-
-endmacro()
-
-configure_msvc_runtime()
+# Limit the exported symbols when sentry is built as a shared library to those with a "sentry_" prefix:
+# - we do this at the end of the file as to not affect subdirectories reading target_link_libraries from the parent.
+# - we do this as PRIVATE since our version script does not make sense in any other project that adds us.
+#
+# Used linker parameters:
+# `--build-id`: To have a build-id in the ELF object.
+# `--version-script`: version script either hides "foreign" symbols or defers them as unknown ("U") to system libraries.
+# FIXME: cmake 3.13 introduced target_link_options (blocked by Android)
+if(SENTRY_BUILD_SHARED_LIBS)
+	target_link_libraries(sentry PRIVATE
+			"$<$<OR:$<PLATFORM_ID:Linux>,$<PLATFORM_ID:Android>>:-Wl,--build-id=sha1,--version-script=${PROJECT_SOURCE_DIR}/src/exports.map>")
+endif()
