@@ -1,12 +1,12 @@
-# enables support for CMAKE_MSVC_RUNTIME_LIBRARY
-cmake_policy(SET CMP0091 NEW)
-
 if(WIN32)
 	cmake_minimum_required (VERSION 3.16.4)
 else()
 	# The Android tools ship with this ancient version, which we need to support.
 	cmake_minimum_required (VERSION 3.10)
 endif()
+
+# enables support for CMAKE_MSVC_RUNTIME_LIBRARY
+cmake_policy(SET CMP0091 NEW)
 
 add_definitions(-D_ITERATOR_DEBUG_LEVEL=0)
 
