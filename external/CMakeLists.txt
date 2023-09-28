@@ -171,7 +171,7 @@ if(WIN32)
     target_compile_definitions(breakpad_client PRIVATE _UNICODE UNICODE)
 
     # set static runtime if enabled
-    if(SENTRY_BUILD_RUNTIMESTATIC AND MSVC)
+    if(SENTRY_BUILD_RUNTIMESTATIC)
         set_property(TARGET breakpad_client PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
 endif()

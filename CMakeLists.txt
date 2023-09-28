@@ -309,11 +309,6 @@ if(MSVC)
 		COMPILE_FLAGS
 		"/W0"
 	)
-
-	# set static runtime if enabled
-	if(SENTRY_BUILD_RUNTIMESTATIC)
-		set_property(TARGET sentry PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-	endif()
 else()
 	target_compile_options(sentry PRIVATE $<BUILD_INTERFACE:-Wall -Wextra -Wpedantic>)
 	# The crashpad and breakpad headers generate the following warnings that we
@@ -328,6 +323,10 @@ else()
 	)
 endif()
 
+# set static runtime if enabled
+if(SENTRY_BUILD_RUNTIMESTATIC)
+	set_property(TARGET sentry PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 target_include_directories(sentry
 	PUBLIC
